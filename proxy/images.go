@@ -605,7 +605,7 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
-	tool := []byte(`{"type":"image_generation","action":"generate","model":""}`)
+	tool := []byte(`{"type":"image_generation","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
 	for _, field := range []string{"size", "quality", "background", "output_format", "moderation"} {
@@ -707,7 +707,7 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 }
 
 func buildImagesEditToolFromForm(c *gin.Context, imageModel, maskDataURL string) []byte {
-	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
+	tool := []byte(`{"type":"image_generation","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, strings.TrimSpace(c.PostForm("prompt")))
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
@@ -788,7 +788,7 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
-	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
+	tool := []byte(`{"type":"image_generation","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
@@ -831,6 +831,10 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	req, _ = sjson.SetRawBytes(req, "tools", []byte(`[]`))
 	if len(toolJSON) > 0 && json.Valid(toolJSON) {
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
+	} else {
+		// 如果 toolJSON 无效，添加默认的 image_generation 工具
+		defaultTool := []byte(`{"type":"image_generation","model":"gpt-image-2"}`)
+		req, _ = sjson.SetRawBytes(req, "tools.-1", defaultTool)
 	}
 	return req
 }
