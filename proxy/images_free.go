@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,8 @@ type FreeAccountImageGenerator struct {
 
 // GenerateImage 使用 Free 账号生图
 func (f *FreeAccountImageGenerator) GenerateImage(c *gin.Context, account *auth.Account, prompt string, size string, n int) ([]string, error) {
+	log.Printf("[FreeAccountImageGenerator] Starting generation for account=%d prompt=%q size=%s n=%d", account.ID(), prompt, size, n)
+	
 	// 1. 准备请求参数
 	convID := generateUUID()
 	messageID := generateUUID()
@@ -74,14 +77,18 @@ func (f *FreeAccountImageGenerator) GenerateImage(c *gin.Context, account *auth.
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[FreeAccountImageGenerator] Request failed for account=%d: %v", account.ID(), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("[FreeAccountImageGenerator] Upstream error for account=%d: status=%d, body=%s", account.ID(), resp.StatusCode, string(bodyBytes))
 		return nil, fmt.Errorf("upstream error: status=%d, body=%s", resp.StatusCode, string(bodyBytes))
 	}
+	
+	log.Printf("[FreeAccountImageGenerator] Got response for account=%d, parsing SSE...", account.ID())
 
 	// 5. 解析 SSE 响应，提取图片引用
 	imageRefs := []string{}
