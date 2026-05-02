@@ -877,6 +877,90 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			}
 		}
 
+		// 检查是否为 Free 账号，如果是则使用特殊的生图逻辑
+		if !auth.IsPlusOrHigherPlan(account.GetPlanType()) {
+			start := time.Now()
+
+			// 从 responsesBody 中提取 prompt、size 和 n
+			prompt := gjson.GetBytes(responsesBody, "input.0.content.0.text").String()
+			size := gjson.GetBytes(responsesBody, "tools.0.size").String()
+			if size == "" {
+				size = defaultImages1KSize
+			}
+			n := int(gjson.GetBytes(responsesBody, "n").Int())
+			if n <= 0 {
+				n = 1
+			}
+
+			// 使用 Free 账号生图器
+			generator := &FreeAccountImageGenerator{handler: h}
+			imageRefs, genErr := generator.GenerateImage(c, account, prompt, size, n)
+
+			if genErr != nil {
+				h.store.Release(account)
+				excludeAccounts[account.ID()] = true
+				lastErr = genErr
+				continue
+			}
+
+			// 下载图片并转换为 base64
+			results := make([]imageCallResult, 0, len(imageRefs))
+			for _, fileID := range imageRefs {
+				b64, downloadErr := generator.DownloadImageAsBase64(c.Request.Context(), account, fileID)
+				if downloadErr != nil {
+					h.store.Release(account)
+					excludeAccounts[account.ID()] = true
+					lastErr = downloadErr
+					continue
+				}
+
+				results = append(results, imageCallResult{
+					Result:        b64,
+					RevisedPrompt: prompt,
+					OutputFormat:  "png",
+					Size:          size,
+					Model:         requestModel,
+				})
+			}
+
+			if len(results) == 0 {
+				h.store.Release(account)
+				excludeAccounts[account.ID()] = true
+				lastErr = fmt.Errorf("failed to download any images")
+				continue
+			}
+
+			// 构建响应
+			responseData, buildErr := buildImagesAPIResponse(results, time.Now().Unix(), nil, results[0], responseFormat)
+			if buildErr != nil {
+				h.store.Release(account)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": buildErr.Error(), "type": "server_error"}})
+				return
+			}
+
+			// 记录使用日志
+			logInput := &database.UsageLogInput{
+				AccountID:        account.ID(),
+				Endpoint:         inboundEndpoint,
+				Model:            requestModel,
+				StatusCode:       http.StatusOK,
+				DurationMs:       int(time.Since(start).Milliseconds()),
+				InboundEndpoint:  inboundEndpoint,
+				UpstreamEndpoint: "/backend-api/f/conversation",
+				Stream:           stream,
+				CompletionTokens: len(results),
+				OutputTokens:     len(results),
+				TotalTokens:      len(results),
+			}
+			h.logUsageForRequest(c, logInput)
+
+			h.store.ReportRequestSuccess(account, time.Duration(logInput.DurationMs)*time.Millisecond)
+			h.store.Release(account)
+
+			c.Data(http.StatusOK, "application/json", responseData)
+			return
+		}
+
 		start := time.Now()
 		proxyURL := stickyProxyURL
 		if proxyURL == "" {
