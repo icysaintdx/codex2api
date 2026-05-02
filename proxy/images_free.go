@@ -55,27 +55,15 @@ func (f *FreeAccountImageGenerator) GenerateImage(c *gin.Context, account *auth.
 
 	body, _ := json.Marshal(payload)
 
-	// 3. 发送请求
-	req, err := http.NewRequestWithContext(c.Request.Context(), "POST",
-		"https://chatgpt.com/backend-api/f/conversation",
-		bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	// 3. 使用 ExecuteRequest 发送请求（带设备指纹和代理支持）
+	proxyURL := f.handler.store.ResolveProxyForAccount(account)
+	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	deviceCfg := f.handler.deviceCfg
+	if deviceCfg == nil {
+		deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 	}
 
-	// 设置必要的请求头
-	account.Mu().RLock()
-	accessToken := account.AccessToken
-	account.Mu().RUnlock()
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	// 4. 执行请求
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := ExecuteRequest(c.Request.Context(), account, body, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), f.handler.shouldUseWebsocketForHTTP())
 	if err != nil {
 		log.Printf("[FreeAccountImageGenerator] Request failed for account=%d: %v", account.ID(), err)
 		return nil, err
