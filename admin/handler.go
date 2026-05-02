@@ -3129,3 +3129,16 @@ func (h *Handler) fetchImageQuota(ctx context.Context, accessToken, proxyURL str
 
 	return info, nil
 }
+
+// createProxyTransport 创建支持代理的 HTTP Transport
+func (h *Handler) createProxyTransport(proxyURL string) (*http.Transport, error) {
+	transport := &http.Transport{}
+	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = baseDialer.DialContext
+
+	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
+		return nil, err
+	}
+
+	return transport, nil
+}

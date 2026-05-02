@@ -61,9 +61,13 @@ func (f *FreeAccountImageGenerator) GenerateImage(c *gin.Context, account *auth.
 	}
 
 	// 设置必要的请求头
+	account.Mu().RLock()
+	accessToken := account.AccessToken
+	account.Mu().RUnlock()
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+account.GetAccessToken())
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	// 4. 执行请求
@@ -148,10 +152,14 @@ func (f *FreeAccountImageGenerator) pollConversation(ctx context.Context, accoun
 			return imageRefs, ctx.Err()
 		case <-ticker.C:
 			// 请求会话详情
+			account.Mu().RLock()
+			accessToken := account.AccessToken
+			account.Mu().RUnlock()
+
 			req, _ := http.NewRequestWithContext(ctx, "GET",
 				fmt.Sprintf("https://chatgpt.com/backend-api/conversation/%s", convID),
 				nil)
-			req.Header.Set("Authorization", "Bearer "+account.GetAccessToken())
+			req.Header.Set("Authorization", "Bearer "+accessToken)
 
 			client := &http.Client{Timeout: 10 * time.Second}
 			resp, err := client.Do(req)
@@ -269,7 +277,11 @@ func (f *FreeAccountImageGenerator) DownloadImageAsBase64(ctx context.Context, a
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+account.GetAccessToken())
+	account.Mu().RLock()
+	accessToken := account.AccessToken
+	account.Mu().RUnlock()
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	client := &http.Client{Timeout: 30 * time.Second}
