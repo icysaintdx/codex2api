@@ -920,11 +920,14 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				n = 1
 			}
 
+			log.Printf("[image-forward] Free account params: prompt=%q size=%s n=%d", prompt, size, n)
+
 			// 使用 Free 账号生图器
 			generator := &FreeAccountImageGenerator{handler: h}
 			imageRefs, genErr := generator.GenerateImage(c, account, prompt, size, n)
 
 			if genErr != nil {
+				log.Printf("[image-forward] Free account generation failed for account id=%d: %v", account.ID(), genErr)
 				h.store.Release(account)
 				excludeAccounts[account.ID()] = true
 				continue
