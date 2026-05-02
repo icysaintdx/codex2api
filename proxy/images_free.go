@@ -54,16 +54,38 @@ func (f *FreeAccountImageGenerator) GenerateImage(c *gin.Context, account *auth.
 	}
 
 	body, _ := json.Marshal(payload)
+	
+	log.Printf("[FreeAccountImageGenerator] Request payload: %s", string(body))
 
-	// 3. 使用 ExecuteRequest 发送请求（带设备指纹和代理支持）
-	proxyURL := f.handler.store.ResolveProxyForAccount(account)
-	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	deviceCfg := f.handler.deviceCfg
-	if deviceCfg == nil {
-		deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
+	// 3. 直接发送到 /backend-api/f/conversation（不使用 ExecuteRequest，因为它硬编码了 /responses）
+	account.Mu().RLock()
+	accessToken := account.AccessToken
+	account.Mu().RUnlock()
+	
+	if accessToken == "" {
+		return nil, fmt.Errorf("no access token")
 	}
-
-	resp, err := ExecuteRequest(c.Request.Context(), account, body, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), f.handler.shouldUseWebsocketForHTTP())
+	
+	// 构建请求
+	endpoint := "https://chatgpt.com/backend-api/f/conversation"
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	
+	// 设置请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	
+	// 使用代理
+	proxyURL := f.handler.store.ResolveProxyForAccount(account)
+	client := createHTTPClient(proxyURL, 120*time.Second)
+	
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[FreeAccountImageGenerator] Request failed for account=%d: %v", account.ID(), err)
 		return nil, err
@@ -298,4 +320,22 @@ func (f *FreeAccountImageGenerator) DownloadImageAsBase64(ctx context.Context, a
 
 	// 转换为 base64
 	return base64.StdEncoding.EncodeToString(imageData), nil
+}
+
+// createHTTPClient 创建带代理的 HTTP 客户端
+func createHTTPClient(proxyURL string, timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+	}
+	
+	if proxyURL != "" {
+		if proxy, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxy)
+		}
+	}
+	
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
 }
