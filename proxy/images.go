@@ -858,9 +858,16 @@ func imagePreferredAccountFilter(account *auth.Account) bool {
 func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool) (*auth.Account, string) {
 	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, imagePreferredAccountFilter)
 	if account != nil {
+		log.Printf("[image-account] selected Plus account id=%d plan=%s", account.ID(), account.GetPlanType())
 		return account, stickyProxyURL
 	}
-	return h.nextAccountForSession("", apiKeyID, exclude)
+	account, stickyProxyURL = h.nextAccountForSession("", apiKeyID, exclude)
+	if account != nil {
+		log.Printf("[image-account] selected Free account id=%d plan=%s", account.ID(), account.GetPlanType())
+	} else {
+		log.Printf("[image-account] no account available (exclude count=%d)", len(exclude))
+	}
+	return account, stickyProxyURL
 }
 
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
@@ -879,10 +886,13 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	excludeAccounts := make(map[int64]bool)
 
 	for attempt := 0; ; attempt++ {
+		log.Printf("[image-forward] attempt=%d excludeAccounts=%d", attempt, len(excludeAccounts))
 		account, stickyProxyURL := h.nextImageAccount(apiKeyID, excludeAccounts)
 		if account == nil {
+			log.Printf("[image-forward] no immediate account, waiting...")
 			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts)
 			if account == nil {
+				log.Printf("[image-forward] wait timeout, no account available")
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
@@ -890,10 +900,12 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"}})
 				return
 			}
+			log.Printf("[image-forward] got account after wait id=%d plan=%s", account.ID(), account.GetPlanType())
 		}
 
 		// 检查是否为 Free 账号，如果是则使用特殊的生图逻辑
 		if !auth.IsPlusOrHigherPlan(account.GetPlanType()) {
+			log.Printf("[image-forward] using Free account generator for account id=%d", account.ID())
 			start := time.Now()
 
 			// 从 responsesBody 中提取 prompt、size 和 n
