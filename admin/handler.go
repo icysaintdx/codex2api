@@ -313,6 +313,13 @@ type accountResponse struct {
 	Usage7dDetail            *accountUsageWindow        `json:"usage_7d_detail,omitempty"`
 	Reset5hAt                string                     `json:"reset_5h_at,omitempty"`
 	Reset7dAt                string                     `json:"reset_7d_at,omitempty"`
+	// Free 账号额度信息
+	FreeQuota                *freeQuotaResponse         `json:"free_quota,omitempty"`
+	// 图片配额信息
+	ImageQuotaRemaining      *int                       `json:"image_quota_remaining,omitempty"`
+	ImageQuotaTotal          *int                       `json:"image_quota_total,omitempty"`
+	TodayUsedCount           *int                       `json:"today_used_count,omitempty"`
+	ImageQuotaResetAt        string                     `json:"image_quota_reset_at,omitempty"`
 	ScoreBreakdown           schedulerBreakdownResponse `json:"scheduler_breakdown"`
 	LastUnauthorizedAt       string                     `json:"last_unauthorized_at,omitempty"`
 	LastRateLimitedAt        string                     `json:"last_rate_limited_at,omitempty"`
@@ -324,11 +331,6 @@ type accountResponse struct {
 	Enabled                  bool                       `json:"enabled"`
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
-	// 图片配额信息
-	ImageQuotaRemaining *int   `json:"image_quota_remaining,omitempty"`
-	ImageQuotaTotal     *int   `json:"image_quota_total,omitempty"`
-	TodayUsedCount      *int   `json:"today_used_count,omitempty"`
-	ImageQuotaResetAt   string `json:"image_quota_reset_at,omitempty"`
 }
 
 type modelCooldownResponse struct {
@@ -343,6 +345,14 @@ type accountUsageWindow struct {
 	Tokens        int64   `json:"tokens"`
 	AccountBilled float64 `json:"account_billed"`
 	UserBilled    float64 `json:"user_billed"`
+}
+
+type freeQuotaResponse struct {
+	RemainingTokens int64   `json:"remaining_tokens"` // 剩余 Token 数
+	RemainingAmount float64 `json:"remaining_amount"` // 剩余金额（美元）
+	TotalTokens     int64   `json:"total_tokens"`     // 总 Token 数
+	TotalAmount     float64 `json:"total_amount"`     // 总金额（美元）
+	ResetAt         string  `json:"reset_at"`         // 重置时间
 }
 
 type schedulerBreakdownResponse struct {
@@ -503,6 +513,84 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 		}
 		accounts = append(accounts, resp)
+	}
+
+	// 并发查询所有账号的 5h/7d 详细用量数据和图片配额
+	type usageResult struct {
+		accountID           int64
+		usage5h             *accountUsageWindow
+		usage7d             *accountUsageWindow
+		imageQuotaRemaining *int
+		imageQuotaTotal     *int
+		imageQuotaResetAt   string
+	}
+	usageResults := make(chan usageResult, len(accounts))
+	var wg sync.WaitGroup
+
+	for i := range accounts {
+		wg.Add(1)
+		go func(acc *accountResponse, row *database.AccountRow) {
+			defer wg.Done()
+			result := usageResult{accountID: acc.ID}
+
+			// 查询 5h 用量
+			if usage5h, err := h.db.GetTimeRangeUsage(ctx, acc.ID, 5*time.Hour); err == nil && usage5h != nil {
+				result.usage5h = &accountUsageWindow{
+					Requests:      usage5h.Requests,
+					Tokens:        usage5h.Tokens,
+					AccountBilled: usage5h.AccountBilled,
+					UserBilled:    usage5h.UserBilled,
+				}
+			}
+
+			// 查询 7d 用量
+			if usage7d, err := h.db.GetTimeRangeUsage(ctx, acc.ID, 7*24*time.Hour); err == nil && usage7d != nil {
+				result.usage7d = &accountUsageWindow{
+					Requests:      usage7d.Requests,
+					Tokens:        usage7d.Tokens,
+					AccountBilled: usage7d.AccountBilled,
+					UserBilled:    usage7d.UserBilled,
+				}
+			}
+
+			// 获取图片配额信息（仅对 active 状态的账号）
+			if acc.Status == "active" || acc.Status == "ready" {
+				accessToken := row.GetCredential("access_token")
+				if accessToken != "" {
+					if quota, err := h.fetchImageQuota(ctx, accessToken, row.ProxyURL); err == nil && quota != nil {
+						result.imageQuotaRemaining = &quota.Remaining
+						result.imageQuotaTotal = &quota.Total
+						if !quota.ResetAt.IsZero() {
+							result.imageQuotaResetAt = quota.ResetAt.Format(time.RFC3339)
+						}
+					}
+				}
+			}
+
+			usageResults <- result
+		}(&accounts[i], rows[i])
+	}
+
+	// 等待所有查询完成
+	go func() {
+		wg.Wait()
+		close(usageResults)
+	}()
+
+	// 将用量数据和图片配额填充到对应的账号
+	usageMap := make(map[int64]usageResult)
+	for result := range usageResults {
+		usageMap[result.accountID] = result
+	}
+
+	for i := range accounts {
+		if result, ok := usageMap[accounts[i].ID]; ok {
+			accounts[i].Usage5hDetail = result.usage5h
+			accounts[i].Usage7dDetail = result.usage7d
+			accounts[i].ImageQuotaRemaining = result.imageQuotaRemaining
+			accounts[i].ImageQuotaTotal = result.imageQuotaTotal
+			accounts[i].ImageQuotaResetAt = result.imageQuotaResetAt
+		}
 	}
 
 	c.JSON(http.StatusOK, accountsResponse{Accounts: accounts})
@@ -3234,4 +3322,129 @@ func (h *Handler) TestProxy(c *gin.Context) {
 		"latency_ms": latencyMs,
 		"location":   location,
 	})
+}
+
+// imageQuotaInfo 图片配额信息
+type imageQuotaInfo struct {
+	Remaining int       `json:"remaining"`
+	Total     int       `json:"total"`
+	ResetAt   time.Time `json:"reset_at"`
+}
+
+// fetchImageQuota 获取账号的图片配额信息
+// 调用 /backend-api/conversation/init 端点获取图片配额数据
+func (h *Handler) fetchImageQuota(ctx context.Context, accessToken, proxyURL string) (*imageQuotaInfo, error) {
+	reqBody := []byte(`{"gizmo_id":null,"requested_default_model":null,"conversation_id":null,"timezone_offset_min":-480,"system_hints":["picture_v2"]}`)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://chatgpt.com/backend-api/conversation/init", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	// 设置请求头（参考 gpt2api 的实现）
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+
+	// 创建 HTTP 客户端（支持代理）
+	client := &http.Client{Timeout: 15 * time.Second}
+	if proxyURL != "" {
+		transport, err := h.createProxyTransport(proxyURL)
+		if err == nil {
+			client.Transport = transport
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("conversation/init http=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	data, _ := io.ReadAll(resp.Body)
+
+	// 解析响应
+	var payload struct {
+		LimitsProgress []struct {
+			FeatureName string `json:"feature_name"`
+			Remaining   *int   `json:"remaining"`
+			ResetAfter  string `json:"reset_after"`
+			MaxValue    *int   `json:"max_value"`
+			Cap         *int   `json:"cap"`
+			Total       *int   `json:"total"`
+			Limit       *int   `json:"limit"`
+		} `json:"limits_progress"`
+	}
+
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+
+	info := &imageQuotaInfo{
+		Remaining: -1,
+		Total:     -1,
+	}
+
+	// 查找 image_gen 相关的配额信息
+	for _, item := range payload.LimitsProgress {
+		featureName := strings.ToLower(item.FeatureName)
+		if !strings.Contains(featureName, "image") {
+			continue
+		}
+
+		if item.Remaining != nil {
+			if info.Remaining < 0 || *item.Remaining < info.Remaining {
+				info.Remaining = *item.Remaining
+			}
+		}
+
+		// 获取 total（优先级：MaxValue > Cap > Total > Limit）
+		if item.MaxValue != nil && *item.MaxValue > info.Total {
+			info.Total = *item.MaxValue
+		} else if item.Cap != nil && *item.Cap > info.Total {
+			info.Total = *item.Cap
+		} else if item.Total != nil && *item.Total > info.Total {
+			info.Total = *item.Total
+		} else if item.Limit != nil && *item.Limit > info.Total {
+			info.Total = *item.Limit
+		}
+
+		// 解析重置时间
+		if item.ResetAfter != "" {
+			if t, e := time.Parse(time.RFC3339, item.ResetAfter); e == nil {
+				if info.ResetAt.IsZero() || t.Before(info.ResetAt) {
+					info.ResetAt = t
+				}
+			}
+		}
+	}
+
+	// 如果没有找到配额信息，返回 nil
+	if info.Remaining < 0 {
+		return nil, nil
+	}
+
+	return info, nil
+}
+
+// createProxyTransport 创建支持代理的 HTTP Transport
+func (h *Handler) createProxyTransport(proxyURL string) (*http.Transport, error) {
+	transport := &http.Transport{}
+	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = baseDialer.DialContext
+
+	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
+		return nil, err
+	}
+
+	return transport, nil
 }

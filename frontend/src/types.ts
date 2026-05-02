@@ -69,6 +69,13 @@ export interface AccountRow {
   usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  // Free 账号额度信息
+  free_quota?: FreeQuotaInfo
+  // 生图相关信息（图片配额）
+  image_quota_remaining?: number
+  image_quota_total?: number
+  today_used_count?: number
+  image_quota_reset_at?: ISODateString
   cooldown_until?: ISODateString
   cooldown_reason?: string
   model_cooldowns?: Array<{
@@ -79,11 +86,14 @@ export interface AccountRow {
   }>
   enabled?: boolean
   locked?: boolean
-  // 图片配额信息
-  image_quota_remaining?: number
-  image_quota_total?: number
-  today_used_count?: number
-  image_quota_reset_at?: ISODateString
+}
+
+export interface FreeQuotaInfo {
+  remaining_tokens: number
+  remaining_amount: number
+  total_tokens: number
+  total_amount: number
+  reset_at: string
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
@@ -112,6 +122,13 @@ export interface AccountModelStat {
   tokens: number
 }
 
+export interface TimeRangeUsage {
+  requests: number
+  tokens: number
+  account_billed: number
+  user_billed: number
+}
+
 export interface AccountUsageDetail {
   total_requests: number
   total_tokens: number
@@ -120,6 +137,8 @@ export interface AccountUsageDetail {
   reasoning_tokens: number
   cached_tokens: number
   models: AccountModelStat[]
+  usage_5h?: TimeRangeUsage
+  usage_7d?: TimeRangeUsage
 }
 
 export interface MessageResponse {

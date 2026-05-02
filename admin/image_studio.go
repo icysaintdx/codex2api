@@ -55,7 +55,7 @@ type imageGenerationJobPayload struct {
 	OutputFormat string `json:"output_format"`
 	Background   string `json:"background"`
 	Style        string `json:"style"`
-	Upscale      string `json:"upscale"`
+	Upscale      string `json:"upscale"` // 本地放大档位: "", "2k", "4k"
 	APIKeyID     int64  `json:"api_key_id"`
 	TemplateID   int64  `json:"template_id"`
 }
